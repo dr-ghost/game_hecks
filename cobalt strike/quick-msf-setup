@@ -1,0 +1,444 @@
+#!/bin/bash
+#
+# quick-msf-setup v2
+#
+# Ubuntu install adopted from DarkOperator's msf_install.sh script:
+# 	https://raw.github.com/darkoperator/MSF-Installer/master/msf_install.sh
+#
+# Other stuff adopted from the original quick-msf-setup script.
+#
+# Option 2 is logged to /tmp/msfinstall[date].log
+#
+
+MSF_BASE=/opt/metasploit
+REVISION=55ef5dd484
+
+function print_good () {
+    echo -e "\x1B[01;32m[+]\x1B[0m $1"
+}
+
+function print_error () {
+    echo -e "\x1B[01;31m[-]\x1B[0m $1"
+}
+
+function print_status () {
+    echo -e "\x1B[01;34m[*]\x1B[0m $1"
+}
+
+function check_root {
+    if [ "$(id -u)" != "0" ]; then
+       print_error "This step must be run as root"
+       exit 1
+    fi
+}
+
+function install_deps_deb {
+	print_status "Installing dependencies for Metasploit Framework"
+	apt-get -y update  >> $LOGFILE 2>&1
+	apt-get -y install build-essential libreadline-dev libssl-dev libpq5 libpq-dev libreadline5 libsqlite3-dev libpcap-dev openjdk-7-jre subversion git-core autoconf postgresql pgadmin3 curl zlib1g-dev libxml2-dev libxslt1-dev vncviewer libyaml-dev ruby1.9.3 sqlite3 libgdbm-dev libncurses5-dev libtool bison libffi-dev>> $LOGFILE 2>&1
+	if [ $? -eq 1 ] ; then
+		echo "---- Failed to download and install depencies ----" >> $LOGFILE 2>&1
+		print_error "Failed to download and install the depencies for running Metasploit Framework"
+		print_error "Make sure you have the proper permissions and able to download and install packages"
+		print_error "for the distribution you are using."
+		exit 1
+	fi
+
+	print_status "Finished installing the dependencies."
+	print_status "Installing base Ruby Gems"
+	gem install wirble sqlite3 bundler >> $LOGFILE 2>&1
+
+	if [ $? -eq 1 ] ; then
+		echo "---- Failed to download and install base Ruby Gems ----" >> $LOGFILE 2>&1
+		print_error "Failed to download and install Ruby Gems for running Metasploit Framework"
+		exit 1
+	fi
+	print_status "Finished installing the base gems."
+}
+
+function install_nmap_linux {
+	if [[ ! -e `which nmap` ]]; then
+		print_status "Downloading and Compiling the latest version of Nmap"
+		print_status "Downloading from SVN the latest version of Nmap"
+		cd /usr/src
+		echo "---- Downloading the latest version of NMap via SVN ----" >> $LOGFILE 2>&1
+		svn co https://svn.nmap.org/nmap >> $LOGFILE 2>&1
+
+		if [ $? -eq 1 ] ; then
+			print_error "Failed to download the latest version of Nmap"
+			return 1
+		fi
+
+		cd nmap
+		print_status "Configuring Nmap"
+		echo "---- Configuring NMap settings ----" >> $LOGFILE 2>&1
+		./configure >> $LOGFILE 2>&1
+		print_status "Compiling the latest version of Nmap"
+		echo "---- Compiling NMap from source ----" >> $LOGFILE 2>&1
+		make >> $LOGFILE 2>&1
+		if [ $? -eq 1 ] ; then
+			print_error "Failed to compile NMap"
+			return 1
+		fi
+		print_status "Installing the latest version of Nmap"
+		echo "---- Installing NMap ----" >> $LOGFILE 2>&1
+		make install >> $LOGFILE 2>&1
+		if [ $? -eq 1 ] ; then
+			print_error "Failed to install NMap"
+			return 1
+		fi
+		make clean  >> $LOGFILE 2>&1
+	else
+		print_status "Nmap is already installed on the system"
+	fi
+}
+
+function configure_psql_deb {
+	print_status "Creating the MSF Database user msf with the password provided"
+	MSFEXIST="$(su postgres -c "psql postgres -tAc \"SELECT 1 FROM pg_roles WHERE rolname='msf'\"")"
+	if [[ ! $MSFEXIST -eq 1 ]]; then
+		sudo -u postgres psql postgres -c "create role msf login password '$MSFPASS'"  >> $LOGFILE 2>&1
+		if [ $? -eq 0 ]; then
+			print_good "Metasploit Role named msf has been created."
+		else
+			print_error "Failed to create the msf role"
+		fi
+	else
+		print_status "The msf role already exists."
+	fi
+
+	DBEXIST="$(su postgres -c "psql postgres -l | grep msf")"
+	if [[ ! $DBEXIST ]]; then
+        	print_status "Creating msf database and setting the owner to msf user"
+		sudo -u postgres psql postgres -c "CREATE DATABASE msf OWNER msf;" >> $LOGFILE 2>&1
+		if [ $? -eq 0 ]; then
+			print_good "Metasploit Database named msf has been created."
+		else
+			print_error "Failed to create the msf database."
+		fi
+	else
+		print_status "The msf database already exists."
+	fi
+}
+
+function install_msf_linux {
+	print_status "Installing Metasploit Framework from the GitHub Repository"
+
+	# check if msf is installed... if not install it
+	if [[ ! -d $MSF_BASE/msf3 ]]; then
+		print_status "Cloning latest version of Metasploit Framework"
+		git clone https://github.com/rapid7/metasploit-framework.git $MSF_BASE/msf3 >> $LOGFILE 2>&1
+		cd $MSF_BASE/msf3
+		print_status "Winding back to latest tested Metasploit Framework version: $REVISION"
+		git checkout $REVISION >> $LOGFILE 2>&1
+		print_status "Linking metasploit commands."
+		for MSF in $(ls msf*); do
+			print_status "linking $MSF command"
+			ln -s $MSF_BASE/msf3/$MSF /usr/local/bin/$MSF
+		done
+		print_status "Creating Database configuration YAML file."
+		sh -c "echo 'production:
+   adapter: postgresql
+   database: msf
+   username: msf
+   password: $MSFPASS
+   host: 127.0.0.1
+   port: 5432
+   pool: 256
+   timeout: 5' > $MSF_BASE/msf3/config/database.yml"
+		print_status "setting environment variable in system profile."
+		sh -c "echo export MSF_DATABASE_CONFIG=$MSF_BASE/msf3/config/database.yml >> /etc/environment"
+		echo "export MSF_DATABASE_CONFIG=$MSF_BASE/msf3/config/database.yml" >> ~/.bashrc
+		PS1='$ '
+		source ~/.bashrc
+	else
+		print_status "Metasploit already present."
+		cd $MSF_BASE/msf3
+		print_status "Winding back to latest tested Metasploit Framework version: $REVISION"
+		git pull
+		git checkout $REVISION >> $LOGFILE 2>&1
+	fi
+
+	# we should always rebuild gems, even if msf is already installed
+	cd $MSF_BASE/msf3
+	if [[ $RVM -eq 0 ]]; then
+		print_status "Installing ruby gems required by Framework using bundler on RVM Ruby"
+		~/.rvm/bin/rvm 1.9.3-metasploit do bundle install  >> $LOGFILE 2>&1
+	else
+		print_status "Installing ruby gems required by Framework using bundler on System Ruby"
+		bundle install  >> $LOGFILE 2>&1
+	fi
+}
+
+function install_plugins_linux {
+	print_status "Installing additional Metasploit plugins"
+	print_status "Installing Pentest plugin"
+	curl -# -o $MSF_BASE/msf3/plugins/pentest.rb https://raw.github.com/darkoperator/Metasploit-Plugins/master/pentest.rb
+	if [ $? -eq 0 ]; then
+		print_good "The pentest plugin has been installed."
+	else
+		print_error "Failed to install the pentest plugin."
+	fi
+	print_status "Installing DNSRecon Import plugin"
+	curl -# -o $MSF_BASE/msf3/plugins/dnsr_import.rb https://raw.github.com/darkoperator/dnsrecon/master/msf_plugin/dnsr_import.rb
+	if [ $? -eq 0 ]; then
+		print_good "The dnsr_import plugin has been installed."
+	else
+		print_error "Failed to install the dnsr_import plugin."
+	fi
+}
+
+function install_armitage_linux {
+	print_status "Downloading latest version of Armitage"
+	curl -# -o /tmp/armitage.tgz http://www.fastandeasyhacking.com/download/armitage-latest.tgz && print_good "Finished"
+	if [ $? -eq 1 ] ; then
+		print_error "Failed to download the latest version of Armitage make sure you"
+		print_error "are connected to the intertet and can reach http://www.fastandeasyhacking.com"
+	else
+		print_status "Decompressing package to $MSF_BASE/armitage"
+		tar -xvzf /tmp/armitage.tgz -C $MSF_BASE >> $LOGFILE 2>&1
+	fi
+
+	# Check if links exists and if they do not create them
+	if [ ! -e /usr/local/bin/armitage ]; then
+		print_status "Creating link for Armitage in /usr/local/bin/armitage"
+		sh -c "echo java -jar $MSF_BASE/armitage/armitage.jar \$\* > $MSF_BASE/armitage/armitage"
+		ln -s $MSF_BASE/armitage/armitage /usr/local/bin/armitage
+	else
+		print_good "Armitage is already linked to /usr/local/bin/armitage"
+		sh -c "echo java -jar $MSF_BASE/armitage/armitage.jar \$\* > $MSF_BASE/armitage/armitage"
+	fi
+
+	print_good "Finished"
+}
+
+function install_ruby_rvm {
+	if [[ ! -e ~/.rvm/scripts/rvm ]]; then
+		print_status "Installing RVM"
+
+		bash < <(curl -sk https://raw.github.com/wayneeseguin/rvm/master/binscripts/rvm-installer) >> $LOGFILE 2>&1
+		#echo '[[ -s "$HOME/.rvm/scripts/rvm" ]] && . "$HOME/.rvm/scripts/rvm"' >> ~/.bashrc
+		PS1='$ '
+		if [[ $OSTYPE =~ darwin ]]; then
+			source ~/.bash_profile
+		else
+			source ~/.bashrc
+		fi
+
+		print_status "Installing Ruby 1.9.3 under the name 1.9.3-metasploit"
+		if [[ $OSTYPE =~ darwin ]]; then
+			print_status "Installing necessary dependencies under OSX for Ruby 1.9.3"
+			~/.rvm/bin/rvm requirements run
+			print_status "Installing Readline Library"
+			~/.rvm/bin/rvm pkg install readline
+			print_status "Installing Ruby"
+			~/.rvm/bin/rvm reinstall 1.9.3 --with-readline-dir=$rvm_path/usr -n metasploit
+		else
+			~/.rvm/bin/rvm install 1.9.3 -n metasploit >> $LOGFILE 2>&1
+		fi
+
+		if [[ $? -eq 0 ]]; then
+			print_good "Installation of Ruby 1.9.3 was successful"
+
+			~/.rvm/bin/rvm use 1.9.3-metasploit --default >> $LOGFILE 2>&1
+			print_status "Installing base gems"
+			~/.rvm/bin/rvm 1.9.3-metasploit do gem install sqlite3 bundler >> $LOGFILE 2>&1
+			if [[ $? -eq 0 ]]; then
+				print_good "Base gems in the RVM Ruby have been installed."
+			else
+				print_error "Base Gems for the RVM Ruby have failed!"
+				exit 1
+			fi
+		else
+			print_error "Was not able to install Ruby 1.9.3!"
+			exit 1
+		fi
+	else
+		print_status "RVM is already installed"
+		if [[ "$( ls -1 ~/.rvm/rubies/)" =~ ruby-1.9.3-p...-metasploit ]]; then
+			print_status "Ruby for Metasploit is already installed"
+		else
+			PS1='$ '
+			if [[ $OSTYPE =~ darwin ]]; then
+				source ~/.bash_profile
+			else
+				source ~/.bashrc
+			fi
+
+			print_status "Installing Ruby 1.9.3 under the name metasploit"
+			~/.rvm/bin/rvm install 1.9.3 -n metasploit >> $LOGFILE 2>&1
+			if [[ $? -eq 0 ]]; then
+				print_good "Installation of Ruby 1.9.3 was successful"
+
+				~/.rvm/bin/rvm use 1.9.3-metasploit --default >> $LOGFILE 2>&1
+				print_status "Installing base gems"
+				~/.rvm/bin/rvm 1.9.3-metasploit do gem install sqlite3 bundler >> $LOGFILE 2>&1
+				if [[ $? -eq 0 ]]; then
+					print_good "Base gems in the RVM Ruby have been installed."
+				else
+					print_error "Base Gems for the RVM Ruby have failed!"
+					exit 1
+				fi
+			else
+				print_error "Was not able to install Ruby 1.9.3!"
+				exit 1
+			fi
+		fi
+	fi
+}
+
+function install_ubuntu {
+	NOW=$(date +"-%b-%d-%y-%H%M%S")
+	LOGFILE="/tmp/msfinstall$NOW.log"
+	KVER=`uname -a`
+	MSFPASS=`openssl rand -hex 16`
+	IGCC=1
+	INSTALL=1
+	RVM=1
+
+	install_deps_deb
+
+	if [[ $RVM -eq 0 ]]; then
+		install_ruby_rvm
+	fi
+
+	install_nmap_linux
+	configure_psql_deb
+	install_msf_linux
+	install_plugins_linux
+	install_armitage_linux
+	print_status "##################################################################"
+	print_status "### YOU NEED TO RELOAD YOUR PROFILE BEFORE USE OF METASPLOIT!  ###"
+	print_status "### RUN source ~/.bashrc                                       ###"
+	if [[ $RVM -eq 0 ]]; then
+		print_status "###                                                            ###"
+		print_status "### INSTALLATION WAS USING RVM SET 1.9.3-metasploit AS DEFAULT ###"
+		print_status "### RUN rvm use 1.9.3-metasploit --default                     ###"
+        fi
+	print_status "##################################################################"
+}
+
+function install_r7 {
+	# check for curl
+	if [ ! $(command -v curl) ]; then
+		print_error "I need curl to download the Metasploit installer"
+		echo "apt-get update"
+		echo "apt-get install curl"
+		exit 1
+        fi
+
+	# grab the installer
+	if [ $(command -v msfrpcd) ]; then
+		print_error "msfrpcd is available. No need to install the Framework"
+		exit 1
+	else
+		if [ $(uname -m) == "x86_64" ]; then
+			export DOWNLOAD_URL="http://downloads.metasploit.com/data/releases/archive/metasploit-4.9.3-linux-x64-installer.run"
+			export INSTALLER="./metasploit-4.9.3-linux-x64-installer.run"
+			print_status "Downloading the 64-bit Metasploit Installer"
+		else
+			export DOWNLOAD_URL="http://downloads.metasploit.com/data/releases/archive/metasploit-4.9.3-linux-installer.run"
+			export INSTALLER="./metasploit-4.9.3-linux-installer.run"
+			print_status "Downloading the 32-bit Metasploit Installer"
+		fi
+
+		curl $DOWNLOAD_URL >$INSTALLER
+
+		# change permissions on the file...
+		chmod +x $INSTALLER
+
+		print_status "Installing the Metasploit Framework"
+	fi
+
+	# run it
+	$INSTALLER --mode unattended --prefix $MSF_BASE --baseunixservice_install_as_service 1 --unattendedmodeui minimal
+
+	# fix some stuff
+	if [ $(command -v msfrpcd) ]; then
+		true
+	else
+		export PATH=$PATH:/usr/local/bin
+		print_status "Updating ~/.bashrc to add /usr/local/bin to \$PATH"
+		print_status "Type: source ~/.bashrc to apply these changes in this shell"
+	fi
+
+	# check if java is available...
+	if [ $(command -v java) ]; then
+		print_good "Java is installed. Fantastic."
+	else
+		print_status "I'm going to use the Java that comes with Metasploit (updating ~/.bashrc)"
+		print_status "Type: source ~/.bashrc to apply these changes in this shell"
+		echo "export JAVA_HOME=$MSF_BASE/java" >>~/.bashrc
+		echo "export PATH=\$PATH:\$JAVA_HOME/bin" >>~/.bashrc
+	fi
+
+	# make sure we're in the right environment
+	source $MSF_BASE/scripts/setenv.sh
+}
+
+function check_ubuntu_deps {
+	# make sure we're Ubuntu 12.04LTS
+	MISSING=0
+	PACKAGES=""
+	ISUBUNTU=$(cat /etc/issue | grep "Ubuntu 1[24]\.")
+	if  [ "" == "$ISUBUNTU" ]; then
+		print_error "This option requires Ubuntu 12.04 or 14.04"
+		exit 1
+	fi
+
+	print_status "Checking install dependencies"
+
+	# check for openssl
+	if [ ! $(command -v openssl) ]; then
+		MISSING=1
+		PACKAGES="openssl $PACKAGES"
+        fi
+
+	#
+	if [ "1" == "$MISSING" ]; then
+		print_error "A few needed programs are missing. Install them with:"
+		echo "apt-get update"
+		echo "apt-get install $PACKAGES"
+		exit 1
+	else
+		print_good "Looking good on the basic dependencies"
+	fi
+}
+
+function choose {
+	read choice
+	case $choice in
+	1)
+		print_status "Installing"
+		install_r7
+	;;
+	2)
+		check_ubuntu_deps
+		print_status "Installing and setting up environment to get updates via Git"
+		install_ubuntu
+		print_status "Details in $LOGFILE"
+	;;
+	*)
+		print_error "Please select 1 or 2"
+		choose
+	;;
+	esac
+}
+
+check_root
+print_status "Welcome to quick-msf-setup. This script is choose your own adventure, sort of."
+print_status "    How would you like to get updates for the Metasploit Framework?"
+print_status ""
+print_status "    1. I would like to use 'msfupdate' to pull the stable build of the framework."
+print_status "       I realize I will need to activate Metasploit Community Edition to get updates"
+print_status ""
+print_status "       See: https://community.rapid7.com/docs/DOC-2145"
+print_status ""
+print_status "    2. I'd like to get updates via Git. This will allow me to control the exact revision"
+print_status "       of the Metasploit Framework codebase that I am using."
+print_status ""
+print_status "       \x1B[01;31mThere is NO uninstall option for (2). Use this option in a virtual machine only"
+print_status ""
+print_status "Which option would you like (1 or 2)?"
+choose
+print_good "Giddyup... we're ready to rock"
